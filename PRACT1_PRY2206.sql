@@ -1636,9 +1636,6 @@ COMMIT;
 
 SET SERVEROUTPUT ON; --  Para poder activar la salida en la consola
 
-
-DECLARE 
-
 -- Para poder declarar las variables BIND,es decir, estas variables permiten asignar el RUN (numrun/dvrun),los tramos y los valores de pesos de forma paramétrica.
 
   VARIABLE p_numrun       NUMBER;
