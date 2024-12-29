@@ -1805,3 +1805,219 @@ EXCEPTION -- Si ocurre el error “no se encontró ningún dato para asignar en 
         DBMS_OUTPUT.PUT_LINE('ERROR: ' || SQLERRM);-- Para  asegurarnos de que, si surge cualquier error inesperado en el bloque PL/SQL, se pueda capturar y mostrar un mensaje en la salida 
 END;
 
+
+
+--****************************************************************************************************************************************
+--                                                        CASO 2
+--****************************************************************************************************************************************
+
+
+
+-- Para habilitar la salida de DBMS_OUTPUT para ver los mensajes del bloque
+SET SERVEROUTPUT ON;
+
+-- Para definir las variables bind ( paramétricas) para los datos de entrada
+VARIABLE p_nro_cliente NUMBER;
+VARIABLE p_nro_solic_cred NUMBER;
+VARIABLE p_cant_cuotas_post NUMBER;
+
+-- Para asignar valores para el cliente, en este caso tres, el cliente 13, 67 y 5
+
+EXECUTE :p_nro_cliente := 5;                -- Número del cliente
+EXECUTE :p_nro_solic_cred := 2001;           -- Número de solicitud de crédito 
+EXECUTE :p_cant_cuotas_post := 2;             -- Cantidad de cuotas a postergar
+-------------------------------------------------------------------------------
+--                       BLOQUE PL/SQL ANÓNIMO 
+-------------------------------------------------------------------------------
+DECLARE
+    -- Variables de entrada (reciben los valores bind)
+    v_nro_cliente NUMBER := :p_nro_cliente;               -- Número del cliente
+    v_nro_solic_cred NUMBER := :p_nro_solic_cred;         -- Número de solicitud del crédito
+    v_cant_cuotas_post NUMBER := :p_cant_cuotas_post;     -- Cantidad de cuotas a postergar
+
+    -- Variables para almacenar información del crédito y cuotas
+    v_nombre_credito VARCHAR2(100);                        -- Nombre del tipo de crédito
+    v_valor_ultima_cuota NUMBER;                           -- Valor de la última cuota
+    v_fecha_ult_venc DATE;                                  -- Fecha de vencimiento de la última cuota
+    v_tasa_interes NUMBER := 0;                            -- Tasa de interés aplicable según tipo de crédito
+    v_ultima_nro_cuota NUMBER;                              -- Número de la última cuota existente
+    v_cod_credito CREDITO.cod_credito%TYPE;                -- Código del tipo de crédito
+
+    -- Variables auxiliares para las nuevas cuotas
+    v_nueva_fecha_venc DATE;                                -- Fecha de vencimiento de la nueva cuota
+    v_nuevo_monto_cuota NUMBER;                             -- Valor de la nueva cuota con interés aplicado
+
+    -- Variable para verificar si el cliente tiene más de un crédito del año anterior
+    v_total_creditos_anterior NUMBER := 0;                  -- Total de créditos solicitados en los últimos 12 meses
+
+    -- Excepción personalizada para manejar casos sin datos
+    e_no_data EXCEPTION;
+BEGIN
+    -- Recuperar información del crédito y la última cuota asociada
+    SELECT cr.nombre_credito, cc.valor_cuota, cc.fecha_venc_cuota, cc.nro_cuota, ccli.cod_credito
+    INTO v_nombre_credito, v_valor_ultima_cuota, v_fecha_ult_venc, v_ultima_nro_cuota, v_cod_credito
+    FROM credito_cliente ccli
+    JOIN credito cr ON ccli.cod_credito = cr.cod_credito
+    JOIN cuota_credito_cliente cc ON ccli.nro_solic_credito = cc.nro_solic_credito
+    WHERE ccli.nro_solic_credito = v_nro_solic_cred
+      AND cc.nro_cuota = (
+          SELECT MAX(nro_cuota) 
+          FROM cuota_credito_cliente 
+          WHERE nro_solic_credito = v_nro_solic_cred
+      );
+
+    -- Verificar si se encontró el crédito y la cuota
+    IF v_nombre_credito IS NULL THEN
+        RAISE e_no_data;
+    END IF;
+
+    -- Determinar la tasa de interés según el tipo de crédito y cantidad de cuotas a postergar
+    IF UPPER(v_nombre_credito) LIKE '%HIPOTECARIO%' THEN
+        IF v_cant_cuotas_post = 1 THEN
+            v_tasa_interes := 0;        -- Postergación de 1 cuota sin interés
+        ELSIF v_cant_cuotas_post = 2 THEN
+            v_tasa_interes := 0.005;    -- Postergación de 2 cuotas con 0.5% de interés por cuota
+        ELSE
+            RAISE_APPLICATION_ERROR(-20001, 'Cantidad de cuotas a postergar no permitida para Crédito Hipotecario.');
+        END IF;
+    ELSIF UPPER(v_nombre_credito) LIKE '%CONSUMO%' THEN
+        IF v_cant_cuotas_post = 1 THEN
+            v_tasa_interes := 0.01;     -- Postergación de 1 cuota con 1% de interés
+        ELSE
+            RAISE_APPLICATION_ERROR(-20002, 'Cantidad de cuotas a postergar no permitida para Crédito de Consumo.');
+        END IF;
+    ELSIF UPPER(v_nombre_credito) LIKE '%AUTOMOTRIZ%' THEN
+        IF v_cant_cuotas_post = 1 THEN
+            v_tasa_interes := 0.02;     -- Postergación de 1 cuota con 2% de interés
+        ELSE
+            RAISE_APPLICATION_ERROR(-20003, 'Cantidad de cuotas a postergar no permitida para Crédito Automotriz.');
+        END IF;
+    ELSIF UPPER(v_nombre_credito) LIKE '%PERSONAL%' THEN
+        IF v_cant_cuotas_post = 1 THEN
+            v_tasa_interes := 0.015;    -- Postergación de 1 cuota con 1.5% de interés
+        ELSE
+            RAISE_APPLICATION_ERROR(-20005, 'Cantidad de cuotas a postergar no permitida para Crédito Personal.');
+        END IF;
+    ELSE
+        RAISE_APPLICATION_ERROR(-20004, 'Tipo de crédito no reconocido: ' || v_nombre_credito);
+    END IF;
+
+    -- Verificar si el cliente ha solicitado más de un crédito en los últimos 12 meses
+    SELECT COUNT(*)
+    INTO v_total_creditos_anterior
+    FROM credito_cliente
+    WHERE nro_cliente = v_nro_cliente
+      AND fecha_solic_cred >= ADD_MONTHS(SYSDATE, -12)
+      AND nro_solic_credito <> v_nro_solic_cred;
+
+    -- Actualizar y  condonar la última cuota original si aplica
+    IF v_total_creditos_anterior > 1 THEN
+        UPDATE cuota_credito_cliente
+        SET monto_pagado = v_valor_ultima_cuota,        -- Asignar el valor pagado igual al valor de la cuota
+            fecha_pago_cuota = v_fecha_ult_venc,       -- Asignar la fecha de pago igual a la fecha de vencimiento
+            saldo_por_pagar = 0,                        -- Saldo por pagar se establece en 0
+            cod_forma_pago = NULL                       -- Asignar NULL para indicar "CONDONADO"
+        WHERE nro_solic_credito = v_nro_solic_cred
+          AND nro_cuota = v_ultima_nro_cuota;
+
+        -- Mensaje de confirmación
+        DBMS_OUTPUT.PUT_LINE('Última cuota original condonada para el cliente NRO_CLIENTE = ' || v_nro_cliente);
+    END IF;
+
+    -- Generar e insertar las nuevas cuotas según la cantidad solicitada
+    FOR i IN 1..v_cant_cuotas_post LOOP
+        -- Calcular la nueva fecha de vencimiento sumando un mes por cada cuota
+        v_nueva_fecha_venc := ADD_MONTHS(v_fecha_ult_venc, i);
+
+        -- Calcular el nuevo monto de la cuota aplicando la tasa de interés y redondeando a 2 decimales
+        v_nuevo_monto_cuota := ROUND(v_valor_ultima_cuota * (1 + v_tasa_interes), 2);
+
+        -- Insertar la nueva cuota en la tabla CUOTA_CREDITO_CLIENTE
+        INSERT INTO cuota_credito_cliente (
+            nro_solic_credito, 
+            nro_cuota, 
+            fecha_venc_cuota, 
+            valor_cuota,
+            monto_pagado, 
+            fecha_pago_cuota, 
+            saldo_por_pagar, 
+            cod_forma_pago
+        ) VALUES (
+            v_nro_solic_cred,             -- Número de solicitud del crédito
+            v_ultima_nro_cuota + i,       -- Número de la nueva cuota
+            v_nueva_fecha_venc,           -- Fecha de vencimiento de la nueva cuota
+            v_nuevo_monto_cuota,          -- Valor de la nueva cuota
+            NULL,                          -- Monto pagado (NULL)
+            NULL,                          -- Fecha de pago de la cuota (NULL)
+            NULL,                          -- Saldo por pagar (NULL)
+            NULL                           -- Código de forma de pago (NULL)
+        );
+
+        -- Mensaje de confirmación para cada cuota postergada
+        DBMS_OUTPUT.PUT_LINE('Cuota NRO_CUOTA = ' || (v_ultima_nro_cuota + i) || 
+                             ' postergada para el crédito NRO_SOLIC_CREDITO = ' || v_nro_solic_cred || 
+                             ' del cliente NRO_CLIENTE = ' || v_nro_cliente);
+    END LOOP;
+
+    -- Confirmar los cambios en la base de datos
+    COMMIT;
+
+    -- Mensaje de finalización exitosa
+    DBMS_OUTPUT.PUT_LINE('Postergación de cuotas completada para cliente NRO_CLIENTE = ' || v_nro_cliente ||
+                         ', crédito NRO_SOLIC_CREDITO = ' || v_nro_solic_cred ||
+                         ', cuotas postergadas: ' || v_cant_cuotas_post);
+EXCEPTION
+    -- Manejo de excepciones cuando no se encuentra el crédito o el cliente especificado
+    WHEN e_no_data THEN
+        DBMS_OUTPUT.PUT_LINE('No se encontró el crédito solicitado para el cliente NRO_CLIENTE = ' || v_nro_cliente);
+    -- Manejo de cualquier otra excepción
+    WHEN OTHERS THEN
+        ROLLBACK; -- Revertir cambios en caso de error
+        DBMS_OUTPUT.PUT_LINE('Error durante la postergación de cuotas para cliente NRO_CLIENTE = ' || v_nro_cliente || 
+                             ': ' || SQLERRM);
+END;
+/
+
+-- Profesor, hicimos esta query para generar la tabla con las cuotas postergadas para que se viera mejor al momento de sacar el screenshot.
+/*SELECT 
+    nro_solic_credito AS "NRO_SOLIC_CREDITO",
+    nro_cuota AS "NRO_CUOTA",
+    TO_CHAR(fecha_venc_cuota, 'DD/MM/YYYY') AS "FECHA_VENC_CUOTA",
+    valor_cuota AS "VALOR_CUOTA",
+    NVL(TO_CHAR(monto_pagado), '(null)') AS "MONTO_PAGADO",
+    NVL(TO_CHAR(fecha_pago_cuota, 'DD/MM/YYYY'), '(null)') AS "FECHA_PAGO_CUOTA",
+    NVL(TO_CHAR(saldo_por_pagar), '(null)') AS "SALDO_POR_PAGAR",
+    NVL(TO_CHAR(cod_forma_pago), '(null)') AS "COD_FORMA_PAGO"
+FROM (
+    SELECT 
+        cc.nro_solic_credito,
+        cc.nro_cuota,
+        cc.fecha_venc_cuota,
+        cc.valor_cuota,
+        cc.monto_pagado,
+        cc.fecha_pago_cuota,
+        cc.saldo_por_pagar,
+        cc.cod_forma_pago,
+        ROW_NUMBER() OVER (
+            PARTITION BY cc.nro_solic_credito 
+            ORDER BY cc.nro_cuota DESC
+        ) AS rn
+    FROM 
+        cuota_credito_cliente cc
+    WHERE 
+        cc.nro_solic_credito IN (2004, 3004, 2001)
+)
+WHERE 
+    (nro_solic_credito IN (2004, 3004) AND rn = 1) -- Última cuota para 2004 y 3004
+    OR (nro_solic_credito = 2001 AND rn <= 2)      -- Últimas 2 cuotas para 2001
+ORDER BY 
+    CASE 
+        WHEN nro_solic_credito = 2004 THEN 1
+        WHEN nro_solic_credito = 3004 THEN 2
+        WHEN nro_solic_credito = 2001 THEN 3
+    END,
+    nro_solic_credito,
+    nro_cuota ASC; -- Orden ascendente para nro_cuota*/
+
+
+
